@@ -2,86 +2,148 @@ from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
 import re
+import urllib.parse
 
 app = Flask(__name__)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+def get_headers():
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
-def scrape_businesses(query: str, country: str, max_results: int = 10):
+def scrape_duckduckgo(query: str, country: str, max_results: int = 10):
+    """Scrape DuckDuckGo search results - much less likely to block than Google"""
     results = []
-    search_term = f"{query} {country}"
-    encoded = requests.utils.quote(search_term)
+    search_term = f"{query} {country} phone email website"
+    encoded = urllib.parse.quote(search_term)
 
-    # Primary: Google local search
-    url = f"https://www.google.com/search?q={encoded}&tbm=lcl&num=20"
+    url = f"https://html.duckduckgo.com/html/?q={encoded}"
+
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        cards = soup.select("div.VkpGBb") or soup.select("div.rllt__details") or soup.select("div[class*='uMdZh']")
-        print(f"Google local cards found: {len(cards)}")
+        resp = requests.get(url, headers=get_headers(), timeout=15)
+        print(f"DDG status: {resp.status_code}, size: {len(resp.text)}")
+        soup = BeautifulSoup(resp.text, "lxml")
 
-        for card in cards[:max_results]:
+        items = soup.select("div.result, div.results_links, div[class*='result']")
+        print(f"DDG items found: {len(items)}")
+
+        for item in items[:max_results]:
             try:
-                lead = {}
-                name_el = card.select_one("div.dbg0pd span, span.OSrXXb, div[class*='rllt__'] span")
-                lead["name"] = name_el.get_text(strip=True) if name_el else ""
-                if not lead["name"]:
+                # Title / company name
+                title_el = item.select_one("a.result__a, h2 a, a[class*='result']")
+                if not title_el:
                     continue
-                rating_el = card.select_one("span.BTtC6e, span[class*='yi40Hd']")
-                try:
-                    lead["rating"] = float(rating_el.get_text(strip=True)) if rating_el else 0
-                except:
-                    lead["rating"] = 0
-                details = [d.get_text(strip=True) for d in card.select("div.rllt__wrapped div, span.LrzXr") if d.get_text(strip=True)]
-                lead["address"] = details[0] if details else ""
-                lead["phone"] = next((t for t in details if re.search(r'[\+\d][\d\s\-\(\)]{7,}', t)), "")
-                lead["website"] = ""
-                lead["reviews"] = 0
-                lead["source"] = "google_local"
-                results.append(lead)
-            except:
-                continue
-    except Exception as e:
-        print(f"Google local error: {e}")
+                name = title_el.get_text(strip=True)
+                if not name or len(name) < 3:
+                    continue
 
-    # Fallback: Google organic search
-    if not results:
-        url2 = f"https://www.google.com/search?q={encoded}+contact+phone&num=20"
-        try:
-            resp2 = requests.get(url2, headers=HEADERS, timeout=15)
-            soup2 = BeautifulSoup(resp2.text, "html.parser")
-            for item in soup2.select("div.g")[:max_results]:
-                try:
-                    title_el = item.select_one("h3")
-                    if not title_el:
-                        continue
-                    name = title_el.get_text(strip=True)
-                    link_el = item.select_one("a")
-                    website = link_el.get("href", "") if link_el else ""
-                    if website.startswith("/url?q="):
-                        website = website.split("/url?q=")[1].split("&")[0]
-                    snippet_el = item.select_one("div.VwiC3b")
-                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-                    phone_match = re.search(r'[\+\d][\d\s\-\(\)]{8,}', snippet)
+                # Website
+                website = title_el.get("href", "")
+                if "duckduckgo.com" in website or not website.startswith("http"):
+                    redirect_el = item.select_one("a.result__url")
+                    website = redirect_el.get_text(strip=True) if redirect_el else ""
+                    if website and not website.startswith("http"):
+                        website = "https://" + website
+
+                # Snippet
+                snippet_el = item.select_one("a.result__snippet, div.result__snippet, span[class*='snippet']")
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                # Extract phone from snippet
+                phone_match = re.search(r'(\+?\d[\d\s\-\(\)]{8,15})', snippet)
+                phone = phone_match.group(1).strip() if phone_match else ""
+
+                # Extract email from snippet
+                email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', snippet)
+                email = email_match.group(0) if email_match else ""
+
+                results.append({
+                    "name": name,
+                    "website": website,
+                    "phone": phone,
+                    "email": email,
+                    "address": country,
+                    "rating": 0,
+                    "reviews": 0,
+                    "source": "duckduckgo",
+                })
+            except Exception as e:
+                print(f"Item parse error: {e}")
+                continue
+
+    except Exception as e:
+        print(f"DDG error: {e}")
+
+    return results
+
+
+def scrape_bing(query: str, country: str, max_results: int = 10):
+    """Fallback: Bing search"""
+    results = []
+    search_term = f"{query} {country} contact"
+    encoded = urllib.parse.quote(search_term)
+    url = f"https://www.bing.com/search?q={encoded}&count=20"
+
+    try:
+        resp = requests.get(url, headers=get_headers(), timeout=15)
+        print(f"Bing status: {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        items = soup.select("li.b_algo")
+        print(f"Bing items: {len(items)}")
+
+        for item in items[:max_results]:
+            try:
+                title_el = item.select_one("h2 a")
+                if not title_el:
+                    continue
+                name = title_el.get_text(strip=True)
+                website = title_el.get("href", "")
+
+                snippet_el = item.select_one("div.b_caption p, p.b_lineclamp2")
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                phone_match = re.search(r'(\+?\d[\d\s\-\(\)]{8,15})', snippet)
+                phone = phone_match.group(1).strip() if phone_match else ""
+
+                email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', snippet)
+                email = email_match.group(0) if email_match else ""
+
+                if name and len(name) > 3:
                     results.append({
                         "name": name,
                         "website": website,
-                        "phone": phone_match.group(0).strip() if phone_match else "",
-                        "address": "",
+                        "phone": phone,
+                        "email": email,
+                        "address": country,
                         "rating": 0,
                         "reviews": 0,
-                        "source": "google_search",
+                        "source": "bing",
                     })
-                except:
-                    continue
-        except Exception as e:
-            print(f"Fallback error: {e}")
+            except:
+                continue
+
+    except Exception as e:
+        print(f"Bing error: {e}")
 
     return results
+
+
+def scrape_businesses(query: str, country: str, max_results: int = 10):
+    # Try DuckDuckGo first
+    results = scrape_duckduckgo(query, country, max_results)
+
+    # Fallback to Bing if DDG returned nothing
+    if not results:
+        print("DDG returned 0, trying Bing...")
+        results = scrape_bing(query, country, max_results)
+
+    return results[:max_results]
 
 
 @app.route("/scrape", methods=["GET", "POST"])
@@ -95,10 +157,17 @@ def scrape():
         return jsonify({"error": "query and country are required"}), 400
 
     print(f"Request: query={query}, country={country}, max={max_results}")
+
     try:
         leads = scrape_businesses(query, country, max_results)
-        return jsonify({"success": True, "count": len(leads), "leads": leads})
+        print(f"Returning {len(leads)} leads")
+        return jsonify({
+            "success": True,
+            "count": len(leads),
+            "leads": leads,
+        })
     except Exception as e:
+        print(f"Failed: {e}")
         return jsonify({"error": str(e), "success": False}), 500
 
 
