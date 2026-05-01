@@ -87,7 +87,7 @@ def scrape_bing(query: str, country: str, max_results: int = 10):
     results = []
     search_term = f"{query} {country} contact"
     encoded = urllib.parse.quote(search_term)
-    url = f"https://www.bing.com/search?q={encoded}&count=20"
+    url = f"https://www.bing.com/search?q={encoded}+-site:goodfirms.co+-site:designrush.com+-site:clutch.co+-site:sortlist.com+-site:expertise.com&count=30"
 
     try:
         resp = requests.get(url, headers=get_headers(), timeout=15)
@@ -137,22 +137,39 @@ def scrape_bing(query: str, country: str, max_results: int = 10):
 def extract_contact_from_website(url: str) -> dict:
     if not url or not url.startswith("http"):
         return {"phone": "", "email": ""}
-    try:
-        resp = requests.get(url, headers=get_headers(), timeout=8)
-        text = resp.text
 
-        # Extract email
-        email_match = re.findall(r'[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}', text)
-        email = next((e for e in email_match if not e.endswith('.png')
-                     and not e.endswith('.jpg') and 'example' not in e), "")
+    emails_found = []
+    phones_found = []
 
-        # Extract phone
-        phone_match = re.findall(r'(\+?\d[\d\s\-\.\(\)]{7,15}\d)', text)
-        phone = phone_match[0].strip() if phone_match else ""
+    pages_to_check = [url, url.rstrip("/") + "/contact", url.rstrip("/") + "/about"]
 
-        return {"phone": phone, "email": email}
-    except:
-        return {"phone": "", "email": ""}
+    for page_url in pages_to_check:
+        try:
+            resp = requests.get(page_url, headers=get_headers(), timeout=6)
+            text = resp.text
+
+            found_emails = re.findall(r'[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}', text)
+            for e in found_emails:
+                if (not e.endswith(('.png', '.jpg', '.gif', '.css', '.js'))
+                        and 'example' not in e
+                        and 'sentry' not in e
+                        and 'wix' not in e
+                        and len(e) < 60):
+                    emails_found.append(e)
+
+            found_phones = re.findall(r'(\+?\d[\d\s\-\.\(\)]{7,15}\d)', text)
+            phones_found.extend(found_phones)
+
+            if emails_found and phones_found:
+                break
+
+        except:
+            continue
+
+    return {
+        "email": emails_found[0] if emails_found else "",
+        "phone": phones_found[0].strip() if phones_found else "",
+    }
 
 
 def scrape_businesses(query: str, country: str, max_results: int = 10):
@@ -164,14 +181,24 @@ def scrape_businesses(query: str, country: str, max_results: int = 10):
         print("DDG returned 0, trying Bing...")
         results = scrape_bing(query, country, max_results)
 
-    # Deduplicate and enrich with contact info from each website
+    # Deduplicate by name and domain, then enrich with contact info
     enriched = []
     seen_names = set()
+    seen_domains = set()
     for lead in results:
-        name_key = lead["name"].lower().strip()[:30]
-        if name_key in seen_names:
+        name_key = lead["name"].lower().strip()[:25]
+        domain = ""
+        if lead.get("website"):
+            try:
+                domain = lead["website"].replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+            except:
+                domain = ""
+
+        if name_key in seen_names or (domain and domain in seen_domains):
             continue
         seen_names.add(name_key)
+        if domain:
+            seen_domains.add(domain)
 
         if lead.get("website"):
             contact = extract_contact_from_website(lead["website"])
@@ -188,7 +215,7 @@ def scrape():
     data = request.get_json() if request.method == "POST" else request.args
     query = (data.get("query") or "").strip()
     country = (data.get("country") or "").strip()
-    max_results = int(data.get("max_results", 10))
+    max_results = int(data.get("max_results", 20))
 
     if not query or not country:
         return jsonify({"error": "query and country are required"}), 400
