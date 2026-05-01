@@ -134,6 +134,27 @@ def scrape_bing(query: str, country: str, max_results: int = 10):
     return results
 
 
+def extract_contact_from_website(url: str) -> dict:
+    if not url or not url.startswith("http"):
+        return {"phone": "", "email": ""}
+    try:
+        resp = requests.get(url, headers=get_headers(), timeout=8)
+        text = resp.text
+
+        # Extract email
+        email_match = re.findall(r'[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}', text)
+        email = next((e for e in email_match if not e.endswith('.png')
+                     and not e.endswith('.jpg') and 'example' not in e), "")
+
+        # Extract phone
+        phone_match = re.findall(r'(\+?\d[\d\s\-\.\(\)]{7,15}\d)', text)
+        phone = phone_match[0].strip() if phone_match else ""
+
+        return {"phone": phone, "email": email}
+    except:
+        return {"phone": "", "email": ""}
+
+
 def scrape_businesses(query: str, country: str, max_results: int = 10):
     # Try DuckDuckGo first
     results = scrape_duckduckgo(query, country, max_results)
@@ -143,7 +164,23 @@ def scrape_businesses(query: str, country: str, max_results: int = 10):
         print("DDG returned 0, trying Bing...")
         results = scrape_bing(query, country, max_results)
 
-    return results[:max_results]
+    # Deduplicate and enrich with contact info from each website
+    enriched = []
+    seen_names = set()
+    for lead in results:
+        name_key = lead["name"].lower().strip()[:30]
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+
+        if lead.get("website"):
+            contact = extract_contact_from_website(lead["website"])
+            lead["phone"] = lead["phone"] or contact["phone"]
+            lead["email"] = lead.get("email", "") or contact["email"]
+
+        enriched.append(lead)
+
+    return enriched[:max_results]
 
 
 @app.route("/scrape", methods=["GET", "POST"])
