@@ -1,2 +1,5 @@
 flask
-playwright
+gunicorn
+requests
+beautifulsoup4
+lxml
